@@ -1,4 +1,4 @@
-import { Query, Msg, CommandResult } from '../commands';
+import { Query, Msg } from '../commands';
 import { getReadPreference, isSharded } from './shared';
 import { isTransactionCommand } from '../../transactions';
 import { applySession, ClientSession } from '../../sessions';
@@ -8,10 +8,11 @@ import type { Document, BSONSerializeOptions } from '../../bson';
 import type { Server } from '../../sdam/server';
 import type { Topology } from '../../sdam/topology';
 import type { ReadPreferenceLike } from '../../read_preference';
+import type { WriteConcernOptions, WriteConcern, W } from '../../write_concern';
 
 /** @internal */
 export interface CommandOptions extends BSONSerializeOptions {
-  command?: Document;
+  command?: boolean;
   slaveOk?: boolean;
   /** Specify read preference if command supports it */
   readPreference?: ReadPreferenceLike;
@@ -28,6 +29,9 @@ export interface CommandOptions extends BSONSerializeOptions {
   willRetryWrite?: boolean;
   retryWrites?: boolean;
   retrying?: boolean;
+
+  // FIXME: NODE-2781
+  writeConcern?: WriteConcernOptions | WriteConcern | W;
 }
 
 function isClientEncryptionEnabled(server: Server) {
@@ -39,24 +43,24 @@ export function command(
   server: Server,
   ns: string,
   cmd: Document,
-  callback: Callback<CommandResult>
+  callback: Callback<Document>
 ): void;
 export function command(
   server: Server,
   ns: string,
   cmd: Document,
   options: CommandOptions,
-  callback?: Callback<CommandResult>
+  callback?: Callback<Document>
 ): void;
 export function command(
   server: Server,
   ns: string,
   cmd: Document,
   _options: Callback | CommandOptions,
-  _callback?: Callback<CommandResult>
+  _callback?: Callback<Document>
 ): void {
   let options = _options as CommandOptions;
-  const callback = (_callback ?? _options) as Callback<CommandResult>;
+  const callback = (_callback ?? _options) as Callback<Document>;
   if ('function' === typeof options) {
     options = {};
   }
@@ -84,7 +88,7 @@ function _command(
   ns: string,
   cmd: Document,
   options: CommandOptions,
-  callback: Callback<CommandResult>
+  callback: Callback<Document>
 ) {
   const pool = server.s.pool;
   const readPreference = getReadPreference(cmd, options);
@@ -140,7 +144,7 @@ function _command(
 
   const inTransaction = session && (session.inTransaction() || isTransactionCommand(finalCmd));
   const commandResponseHandler = inTransaction
-    ? (err: MongoError, ...args: CommandResult[]) => {
+    ? (err: MongoError, ...args: Document[]) => {
         // We need to add a TransientTransactionError errorLabel, as stated in the transaction spec.
         if (
           err &&
@@ -205,16 +209,7 @@ function _cryptCommand(
       return;
     }
 
-    autoEncrypter.decrypt(response.result, options, (err, decrypted) => {
-      if (err) {
-        callback(err, null);
-        return;
-      }
-
-      response.result = decrypted;
-      response.message.documents = [decrypted];
-      callback(undefined, response);
-    });
+    autoEncrypter.decrypt(response, options, callback);
   };
 
   autoEncrypter.encrypt(ns, cmd, options, (err, encrypted) => {
